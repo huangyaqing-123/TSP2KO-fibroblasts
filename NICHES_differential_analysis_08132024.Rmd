@@ -1,0 +1,354 @@
+---
+title: "NICHES_differential_analysis_08132023"
+author: "Yaqing Huang"
+date: "2024-08-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Set WD
+setwd("~/project/scRNA seq analysis 04012024/NICHE_07242024")
+options(future.globals.maxSize = 2000 * 1024^2)
+
+# Set seed
+set.seed(2)
+
+# Packages
+require(Seurat)
+require(ggplot2)
+require(viridis)
+require(RColorBrewer)
+require(scales)
+require(dplyr)
+require(circlize)
+require(ComplexHeatmap)
+require(cowplot)
+require(patchwork)
+require(SeuratWrappers)
+require(reticulate)
+require(stringr)
+require(ggpol)
+require(poolr)
+require(ggrepel)
+
+
+```
+
+
+## Define colors for cell tyoe
+```{r color}
+# Define colors for cell types
+colors.use <- c('green','#59C9A5','#0267C1','#5FA8D3','#C490D1','#A034F0','#7C6A0A','#53599A','#F0CF65','#F18F01',
+                '#E072A4','#B3001B','#053B06')
+```
+
+
+
+## Load Integrated Data
+
+```{r load data}
+# Load data
+load('~/project/scRNA seq analysis 04012024/NICHE_07242024/fibro.integrated.Robj')
+```
+
+## Grouped differential analysis
+
+Using find markers to do the differential analysis between WT and KO
+
+```{r find markers, eval = FALSE}
+# Using find markers to do the analysis
+Idents(fibro.integrated) <- "SampleType"
+signaling.markers <- FindMarkers(fibro.integrated, ident.1 = "Tsp2.Knockout", 
+                                 ident.2 = "WildType", 
+                                 logfc.threshold = 0.1, 
+                                 min.pct = 0.1,)
+signaling.markers$ratio <- signaling.markers$pct.1/signaling.markers$pct.2
+signaling.markers$power <- signaling.markers$ratio*signaling.markers$avg_log2FC
+```
+
+```{r plot, fig.dim=c(10,8)}
+## Load data
+load('~/project/scRNA seq analysis 04012024/NICHE_07242024/signaling.markers.Robj')
+
+## Draw a volcano plot for the differential signaling markers
+
+# Add a column to the data frame to specify if they are UP- or DOWN- regulated (log2fc respectively positive or negative)
+signaling.markers$diffexpressed <- "NO"
+  # if log2Foldchange > 1, set as "UP"
+signaling.markers$diffexpressed[signaling.markers$avg_log2FC > 1] <- "UP"
+  # if log2Foldchange < -1
+signaling.markers$diffexpressed[signaling.markers$avg_log2FC < -1] <- "DOWN"
+
+# make a label 
+signaling.markers$delabel <- rownames(signaling.markers)
+signaling.markers$delabel[signaling.markers$diffexpressed == "NO"] <- NA
+
+# create a volcano plot
+ggplot(data = signaling.markers, aes(x = avg_log2FC, y = -log10(p_val_adj), col = diffexpressed, label = delabel)) +
+  geom_vline(xintercept = c(-1, 1), col = "gray", linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.1), col = "gray", linetype = "dashed") +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("#ae282c", "gray", "#2066a8"),
+                     labels = c("WT", "Low significance", "KO")) + 
+  coord_cartesian(ylim = c(0, 300), xlim = c(-2.5, 2.5)) + 
+  labs(color = 'Enriched in', #legend_title, 
+       x = expression("log"[2]*"FC"), y = expression("-log"[10]*"p-value")) + 
+  scale_x_continuous(breaks = seq(-10, 10, 2)) +
+  ggtitle('Ligand-Receptor Pairs between KO and WT') +
+  geom_text_repel(max.overlaps = Inf) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background=element_blank())
+```
+
+## Nuoya 1-1 differential analysis
+
+Individual comparison between WT and KO, total 9 pairs.
+
+```{r paired differential analysis, eval = FALSE}
+
+# Set up 
+DefaultAssay(fibro.integrated) <- 'CellToCell'
+fibro.integrated$Condition <- as.character(fibro.integrated$Condition)
+
+# This is the function we used to get the differentiation marker list of a dataset
+# Notice that if we want to differentiate by other idents, change "Idents(x) <- x$SampleType" to other idents
+get_Marker_List <- function(x,min_pct,logfc_threshold){
+  DefaultAssay(x) <- 'CellToCell'
+  Idents(x) <- x$SampleType
+  mark <- FindAllMarkers(x,min.pct = min_pct,logfc.threshold = logfc_threshold,only.pos = T)
+  mark$ratio <- mark$pct.1/mark$pct.2
+  mark$power <- mark$ratio*mark$avg_log2FC
+  return(mark)
+}
+
+
+Experiment_Marker_List <- function(Pseudo_Marker_List,least_sample_num,cluster_ID){
+  
+  Sample_Comb <- t(combn(Sample_Name_List,least_sample_num)) # create all possible sample combinations
+  comb_num <- length(Sample_Comb)/least_sample_num # get number of combinations
+  
+  cur_list <- c() # initializing......
+  
+  # For loop to iterate all combinations to create a list
+  for(i in 1:comb_num){
+    first_Sample_Name <- Sample_Comb[i,1]
+    first_list_flag <- Pseudo_Marker_List[[first_Sample_Name]]['cluster']==cluster_ID&Pseudo_Marker_List[[first_Sample_Name]]['p_val_adj']<0.001
+    first_Sample <- Pseudo_Marker_List[[first_Sample_Name]][first_list_flag,]
+    select_Sample_Gene <- first_Sample$gene # first list for intersection initializing...
+    for(j in 2:least_sample_num){
+      cur_Sample_Name <- Sample_Comb[i,j]
+      list_flag <- Pseudo_Marker_List[[cur_Sample_Name]]['cluster']==cluster_ID&Pseudo_Marker_List[[cur_Sample_Name]]['p_val_adj']<0.001
+      cur_Sample <- Pseudo_Marker_List[[cur_Sample_Name]][list_flag,]
+      cur_Sample_Gene <- cur_Sample$gene
+      select_Sample_Gene <- intersect(select_Sample_Gene,cur_Sample_Gene)
+    }
+    cur_list <- union(cur_list,select_Sample_Gene)  # use union to exclude repetition
+  }
+  return(cur_list)
+}
+
+obj <- fibro.integrated
+obj_list <- SplitObject(obj, split.by = "SampleType")
+obj_list_TK <- SplitObject(obj_list$Tsp2.Knockout,split.by='Condition')
+obj_list_WT <- SplitObject(obj_list$WildType,split.by='Condition')
+
+Pseudo_Marker_List <- c()
+
+for(TK_pointer in obj_list_TK){
+  TK_name <- rownames(table(TK_pointer$Condition))
+  for(WT_pointer in obj_list_WT){
+    WT_name <- rownames(table(WT_pointer$Condition))
+    cur_comb_name <- paste0(TK_name,'_',WT_name,'_pseudo')
+    cur_comb_obj <- merge(TK_pointer,WT_pointer)
+    cur_comb_obj <- JoinLayers(cur_comb_obj)
+    cur_comb_obj$pseudo_name <- cur_comb_name
+    cur_Marker_List <- c()
+    cur_Marker_List[[cur_comb_name]] <- get_Marker_List(cur_comb_obj,min_pct=0.1,logfc_threshold = 0.1)
+    Pseudo_Marker_List <- c(Pseudo_Marker_List,cur_Marker_List)
+  }
+  
+}
+
+obj_name <- paste0('Cell_To_Cell','_Pseudo_Marker_List.Robj')
+save(Pseudo_Marker_List,file = obj_name)
+
+obj_name <- paste0('Cell_To_Cell','_Pseudo_Marker_List.Robj')
+load_Name <- paste0('~/project/scRNA seq analysis 04012024/NICHE_07242024/',obj_name)
+load(load_Name)
+
+
+Sample_Name_List <- names(Pseudo_Marker_List) # the marker list, names of each sample combination for the current cell type
+sample_num <- length(Sample_Name_List) # the number of samples (pseudo)
+
+# Markers exist in at least two pseudo samples
+TK_list <- Experiment_Marker_List(Pseudo_Marker_List,least_sample_num=2,cluster_ID='Tsp2.Knockout')
+WT_list <- Experiment_Marker_List(Pseudo_Marker_List,least_sample_num=2,cluster_ID='WildType')
+
+
+# TK
+cluster_ID <- 'Tsp2.Knockout'
+result <- data.frame()
+
+# Iterate through the sample list to add more rows
+for (j in 1:sample_num){
+  cur_Sample <- Sample_Name_List[j]
+  cluster_flag <- sapply(Pseudo_Marker_List[[cur_Sample]]['cluster'],function(x) x==cluster_ID)
+  selected_cluster <- Pseudo_Marker_List[[cur_Sample]][cluster_flag,]
+  selected_flag <- sapply(selected_cluster$gene, function(x) x %in% TK_list)
+  if(length(selected_flag)>0){
+    selected_genes <- selected_cluster[selected_flag,]
+    if(length(row.names(selected_genes))>0){
+      selected_genes$SampleID <- cur_Sample
+      result <- rbind(result,selected_genes)
+    }
+  }
+}
+
+# We only want significant markers, with p-value < 0.001
+p_val_flag <- result['p_val_adj']<0.001
+result <- result[p_val_flag,]
+
+# Calculate the score for each gene
+gene_score <- result %>% count(gene)
+names(gene_score)[names(gene_score) == "n"] <- "Score"
+
+# Add score column to our data frame
+all_with_score <- result %>% 
+  left_join(gene_score, by='gene')
+
+# Change NA values to numeric 0
+all_with_score <- all_with_score %>% replace(is.na(.), 0)
+
+Marker_Diff_SampleType_TK <- all_with_score %>%    
+  group_by(gene, cluster) %>%    
+  summarize(`Avg pct1` = mean(pct.1),
+            `Avg pct2` = mean(pct.2),
+            `Avg avg_log2FC` = log2(mean(2^avg_log2FC)),
+            `Fisher p value` = fisher(p_val)$p,
+            `Fisher p value adj` = fisher(p_val_adj)$p,
+            `Avg Score` = mean(Score))
+
+Marker_Diff_SampleType_TK$ratio <- Marker_Diff_SampleType_TK$`Avg pct1`/Marker_Diff_SampleType_TK$`Avg pct2`
+Marker_Diff_SampleType_TK$power <- Marker_Diff_SampleType_TK$ratio*Marker_Diff_SampleType_TK$`Avg avg_log2FC`
+
+# WT
+cluster_ID <- 'WildType'
+result <- data.frame()
+
+# Iterate through the sample list to add more rows
+for (j in 1:sample_num){
+  cur_Sample <- Sample_Name_List[j]
+  cluster_flag <- sapply(Pseudo_Marker_List[[cur_Sample]]['cluster'],function(x) x==cluster_ID)
+  selected_cluster <- Pseudo_Marker_List[[cur_Sample]][cluster_flag,]
+  selected_flag <- sapply(selected_cluster$gene, function(x) x %in% WT_list)
+  if(length(selected_flag)>0){
+    selected_genes <- selected_cluster[selected_flag,]
+    if(length(row.names(selected_genes))>0){
+      selected_genes$SampleID <- cur_Sample
+      result <- rbind(result,selected_genes)
+    }
+  }
+}
+
+# We only want significant markers, with p-value < 0.001
+p_val_flag <- result['p_val_adj']<0.001
+result <- result[p_val_flag,]
+
+# Calculate the score for each gene
+gene_score <- result %>% count(gene)
+names(gene_score)[names(gene_score) == "n"] <- "Score"
+
+# Add score column to our data frame
+all_with_score <- result %>% 
+  left_join(gene_score, by='gene')
+
+# Change NA values to numeric 0
+all_with_score <- all_with_score %>% replace(is.na(.), 0)
+
+Marker_Diff_SampleType_WT <- all_with_score %>%    
+  group_by(gene, cluster) %>%    
+  summarize(`Avg pct1` = mean(pct.1),
+            `Avg pct2` = mean(pct.2),
+            `Avg avg_log2FC` = log2(mean(2^avg_log2FC)),
+            `Fisher p value` = fisher(p_val)$p,
+            `Fisher p value adj` = fisher(p_val_adj)$p,
+            `Avg Score` = mean(Score))
+
+Marker_Diff_SampleType_WT$ratio <- Marker_Diff_SampleType_WT$`Avg pct1`/Marker_Diff_SampleType_WT$`Avg pct2`
+Marker_Diff_SampleType_WT$power <- Marker_Diff_SampleType_WT$ratio*Marker_Diff_SampleType_WT$`Avg avg_log2FC`
+
+# Assign output names and save the R objects
+obj_TK_name <- paste0('Markers_Differentiate_TK.Robj')
+save(Marker_Diff_SampleType_TK,file = obj_TK_name)
+
+obj_WT_name <- paste0('Markers_Differentiate_WT.Robj')
+save(Marker_Diff_SampleType_WT,file = obj_WT_name)
+
+```
+
+```{r visualization, fig.dim = c(10,8)}
+# load marker object 
+load('~/project/scRNA seq analysis 04012024/NICHE_07242024/Markers_Differentiate_TK.Robj')
+load('~/project/scRNA seq analysis 04012024/NICHE_07242024/Markers_Differentiate_WT.Robj')
+
+# make a combined list
+Marker_Diff_all <- rbind(Marker_Diff_SampleType_WT, Marker_Diff_SampleType_TK)
+
+# make wt fold change to be negative
+Marker_Diff_all$`Avg avg_log2FC`[Marker_Diff_all$cluster == "WildType"] <- Marker_Diff_all$`Avg avg_log2FC`*(-1)
+
+# Directions in the list
+Marker_Diff_all$direction <- "NO"
+Marker_Diff_all$direction[Marker_Diff_all$`Avg avg_log2FC` >1] <- "Up"
+Marker_Diff_all$direction[Marker_Diff_all$`Avg avg_log2FC` < (-1)] <- "Down"
+
+# Make a label for the most significance ones (score >= 7)
+Marker_Diff_all$delabel <- Marker_Diff_all$gene
+Marker_Diff_all$delabel[Marker_Diff_all$`Avg Score` <7] <- NA
+Marker_Diff_all$delabel[Marker_Diff_all$direction == "NO"] <- NA
+
+
+# a package is required for labels
+require(ggrepel)
+
+#create a volcano plot
+ggplot(data = Marker_Diff_all, aes(x = Marker_Diff_all$`Avg avg_log2FC`, y = Marker_Diff_all$`Avg Score`, col = direction, label = delabel)) +
+  geom_point(position = "jitter") +
+  geom_vline(xintercept = c(-1, 1), col = "gray", linetype = "dashed") +
+  geom_hline(yintercept = 1, col = "gray", linetype = "dashed") +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("#ae282c", "gray", "#2066a8"),
+                     labels = c("WT", "Low significance", "KO")) + 
+  coord_cartesian(ylim = c(6, 10), xlim = c(-2.5, 2.5)) + 
+  labs(color = 'Enriched in', #legend_title, 
+       x = expression("log"[2]*"FC"), y = expression("Score")) + 
+  scale_x_continuous(breaks = seq(-10, 10, 2)) +
+  ggtitle('Ligand-Receptor Pairs between KO and WT') +
+  geom_text_repel(max.overlaps = Inf) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background=element_blank())
+```
+
+## Featured pair plot
+
+Mostly enhanced in KO: PDGFb signaling; Mostly reduced in KO: Bmp4 signaling (in addtion to THBS2)
+
+```{r specific feature plot, fig.dim=c(8,4)}
+# Pdgfb signaling (Sc to other, Endo to fibro)
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Pdgfb—Pdgfrb", split.by = "SampleType")
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Pdgfb—Lrp1", split.by = "SampleType")
+# Bmp4 signaling (downregulated)
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Bmp4—Bmpr2", split.by = "SampleType")
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Bmp4—Bmpr1a", split.by = "SampleType")
+# Notch signaling
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Jag1—Notch1", split.by = "SampleType")
+# Wnt4 major fibroblasts
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Wnt4—Fzd2", split.by = "SampleType") 
+# Tgfb3
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Tgfb3—Eng", split.by = "SampleType") 
+
+```
+

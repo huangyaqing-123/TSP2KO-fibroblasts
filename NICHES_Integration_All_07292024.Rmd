@@ -1,0 +1,235 @@
+---
+title: "NICHES_Integration_07242024"
+output: html_document
+date: "2024-07-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Set working directory
+setwd("~/project/scRNA seq analysis 04012024/NICHE_07242024")
+options(future.globals.maxSize = 2000 * 1024^2)
+
+# Set seed
+set.seed(2)
+
+# Packages
+require(Seurat)
+require(SeuratDisk)
+require(SeuratWrappers)
+require(NICHES)
+require(ggplot2)
+require(cowplot)
+require(dplyr)
+require(Matrix)
+require(patchwork)
+
+```
+
+## Define colors for cell tyoe
+```{r color}
+# Define colors for cell types
+colors.use <- c('green','#59C9A5','#0267C1','#5FA8D3','#C490D1','#A034F0','#7C6A0A','#53599A','#F0CF65','#F18F01',
+                '#E072A4','#B3001B','#053B06')
+```
+
+
+## Create Downsampling Datasets
+
+```{r downsampling, eval = FALSE}
+Idents(fibro.CTC) <- 'Condition'
+table(Idents(fibro.CTC))
+
+Condition_List <- rownames(table(Idents(fibro.CTC)))
+
+cell.list <- WhichCells(fibro.CTC, idents = Condition_List, downsample = 10000)
+fibro.CTC.downsampled <- fibro.CTC[, cell.list]
+table(fibro.CTC.downsampled$Condition)
+
+```
+
+## Before Integration
+
+```{r before integration, eval = FALSE}
+fibro.nonintegrated <- FindNeighbors(fibro.CTC.downsampled)
+fibro.nonintegrated <- FindClusters(fibro.nonintegrated,resolution=0.5,cluster.name='downsample_clusters')
+fibro.nonintegrated <- RunUMAP(fibro.nonintegrated, dims=1:26) # 26 was picked up by running pc heatmap 
+fibro.nonintegrated <- JoinLayers(fibro.nonintegrated)
+save(fibro.nonintegrated,file='fibro.nonintegrated.Robj')
+```
+
+```{r nonintegrated data figure, fig.dim= c(11, 5)}
+# Load nonintegrated data 
+load('~/project/scRNA seq analysis 04012024/NICHE_07242024/fibro.nonintegrated.Robj')
+# Draw figures
+p1 <- DimPlot(fibro.nonintegrated, group.by = "Condition", shuffle = T)
+p2 <- DimPlot(fibro.nonintegrated, group.by = "SampleType", shuffle = T)
+p3 <- DimPlot(fibro.nonintegrated, group.by = "SendingType", 
+        cols = colors.use, shuffle = T) + NoLegend()
+p4 <- DimPlot(fibro.nonintegrated, group.by = "ReceivingType",
+        cols = colors.use, shuffle = T)
+print(p1|p2)
+print(p3|p4)
+```
+
+## Integration
+
+
+```{r Integration, eval = FALSE}
+# Load the downsampled objects
+load('~/project/scRNA seq analysis 04012024/NICHE_07242024/fibro.CTC.downsampled.Robj')
+
+# split each individual object into three samples (by Condition)
+fibro.CTC.downsampled[['CellToCell']] <- split(fibro.CTC.downsampled[['CellToCell']],
+                                                        f = fibro.CTC.downsampled$Condition)
+
+# embed each, via individual 'layers'
+fibro.CTC.downsampled <- FindVariableFeatures(fibro.CTC.downsampled)
+fibro.CTC.downsampled <- ScaleData(fibro.CTC.downsampled)
+fibro.CTC.downsampled <- RunPCA(fibro.CTC.downsampled)
+
+# integrate the 'layers' (condition groups) for each SampleType (Method CCA)
+
+fibro.CTC.integrated <- IntegrateLayers(object = fibro.CTC.downsampled, 
+                                                 method=RPCAIntegration,
+                                                 orig.reduction="pca",new.reduction="integrated.rpca",
+                                                 verbose = FALSE)
+
+
+ElbowPlot(fibro.CTC.integrated,ndims=50)
+PCHeatmap(fibro.CTC.integrated,cells=200,balanced=T,dims=1:9)
+PCHeatmap(fibro.CTC.integrated,cells=200,balanced=T,dims=10:18)
+PCHeatmap(fibro.CTC.integrated,cells=200,balanced=T,dims=19:27)
+PCHeatmap(fibro.CTC.integrated,cells=200,balanced=T,dims=28:36)
+PCHeatmap(fibro.CTC.integrated,cells=200,balanced=T,dims=37:45)
+
+fibro.integrated <- FindNeighbors(fibro.CTC.integrated,reduction='integrated.rpca',dims=1:26)
+fibro.integrated <- FindClusters(fibro.integrated,resolution=0.5,cluster.name='rpca_clusters')
+fibro.integrated <- RunUMAP(fibro.integrated,reduction='integrated.rpca',dims=1:26,reduction.name='umap.rpca')
+fibro.integrated <- JoinLayers(fibro.integrated)
+
+```
+
+```{r integrated object figure, fig.dim=c(11,5)}
+# Load integrated object
+load('~/project/scRNA seq analysis 04012024/NICHE_07242024/fibro.integrated.Robj')
+
+# Dimplot
+p1 <- DimPlot(fibro.integrated, reduction='umap.rpca', group.by = "Condition", shuffle = T)
+p2 <- DimPlot(fibro.integrated, reduction='umap.rpca', group.by = "SampleType", shuffle = T)
+p3 <- DimPlot(fibro.integrated, reduction='umap.rpca', group.by = "SendingType", 
+        cols = colors.use, shuffle = T) + NoLegend()
+p4 <- DimPlot(fibro.integrated, reduction='umap.rpca', group.by = "ReceivingType",
+        cols = colors.use, shuffle = T)
+print(p1|p2)
+print(p3|p4)
+# Can compare these plots with non-integrated ones
+```
+
+
+
+## Find Cluster Markers
+
+```{R clustering, eval = FALSE}
+fibro_integrated_marker <- FindAllMarkers(fibro.integrated, logfc.threshold = 0.25, min.pct = 0.5, 
+                                          only.pos = T)
+fibro_integrated_marker$ratio <- fibro_integrated_marker$pct.1/fibro_integrated_marker$pct.2
+fibro_integrated_marker$power <- fibro_integrated_marker$ratio*fibro_integrated_marker$avg_log2FC
+
+save(fibro_integrated_marker,file='fibro_integrated_marker.Robj')
+```
+
+```{r cluster marker feature plot, fig.dim=c(5,4)}
+# load marker object 
+load('~/project/scRNA seq analysis 04012024/NICHE_07242024/fibro_integrated_marker.Robj')
+# Cluster plot
+DimPlot(fibro.integrated, reduction='umap.rpca', group.by = "rpca_clusters", shuffle = T)
+
+# cluster marker feature plot
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Fgf5—Fgfr1", order = T) # cluster 0
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Fbn1—Itgb3", order = T) # cluster 1,17 " - Itgb3 signaling"
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Col6a2—Itga1", order = T) # cluster 3 " - Itga1 signaling"
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "App—Ngfr", order = T) # cluster 4 other fibroblasts to Sc "Ngfr signaling"
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Vcan—Itga4", order = T) # cluster 5 'itga4'
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Dcn—Egfr",order = T) # cluster 6 -EGFR signaling
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Bdnf—Ngfr", order = T) # cluster7 other to Sc Ngfr
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Plau—Mrc2", order = T) # cluster 8 plau
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Col11a1—Itgb1", order = T) # cluster 9 & cluster 21 " - Itga1 signaling" not specific
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Fn1—Itga3", order = T) # cluster 10 & 27 - Itga3
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Col1a1—Cd36", order = T) # cluster 11 Other - immue
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Rtn4—Ngfr", order = T) # cluster 12 Ngfr
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Calr—Tshr", order = T) # cluster 13 " TSHR (Thyroid Stimulating Hormone Receptor)"
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Mdk—Sdc1", order = T) # cluster 14 MDK growth factor
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Col4a5—Itga2", order = T) # cluster 15 " - Itga2 signaling"
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Col1a1—Itga2", order = T) # cluster 16 - Itga2 signaling
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Angptl2—Tie1", order = T) # cluster 18 to endo
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Pf4—Sdc2",order = T) # cluster 19 -Immune to fibro
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Bmp6—Bmpr2", order = T) # cluster20 Endo to fibro Bmp6, pdgfb signaling
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Hspg2—Itga2", order = T) # cluster 23 " sc to sc Itga2
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Reln—Itga3", order = T) # cluster 24 - sc to others
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Dcn—Egfr", order = T) # cluster 25
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Cgn—Tgfbr2",order = T) # cluster 26 -Epi to fibro
+FeaturePlot(fibro.integrated,reduction='umap.rpca', "Fn1—Itgav", order = T) # cluster28  not specific
+```
+
+
+## Cluster Proportion Analysis
+
+```{r Cluster Sending & Receiving Cell Type Proportion Analysis, fig.dim=c(11,5)}
+# Compute (data -> sending type, data_2 -> receiving type)
+data <- prop.table(table(fibro.integrated$rpca_clusters,fibro.integrated$SendingType),1)*100
+data_2 <- prop.table(table(fibro.integrated$rpca_clusters,fibro.integrated$ReceivingType),1)*100
+# Check:
+rowSums(data) # should all be 100
+# Print:
+data
+# Define colors
+names(colors.use) <- unique(fibro.integrated$SendingType)
+# Define total number of cells, to label x-axis bins
+data0 <- as.data.frame(table(fibro.integrated$rpca_clusters))
+# Organize for plotting
+to.plot <- as.data.frame(data)
+to.plot_2 <- as.data.frame(data_2)
+# Make plot - sending type
+ggplot(to.plot, 
+       aes(x = Var1, y = Freq, fill = Var2)) + 
+  geom_col(position = "fill") + 
+  scale_fill_manual(values = colors.use, name="") + 
+  scale_y_continuous(labels = scales::percent_format()) +
+  xlab("") + 
+  ylab("% of Signaling Cluster") +
+  labs(title = 'Sending Cell Types per Cluster') +
+  theme(plot.title = element_text(size = 20),
+        legend.text = element_text(size = 14),
+        axis.text.x = element_text(size= 16,color='black', angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 14,color='black'),
+        axis.title.x = element_text(size = 16,color='black'),
+        axis.title.y = element_text(size = 16,color='black'),
+        axis.line = element_line(size = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank()) + 
+    geom_text(aes(x = Var1, y = 1, label = Freq, fill = NULL), color='black',
+            data=data0, position = position_dodge(width = 0.5),vjust=-0.3,size=3)
+# Make plot - Receiving type
+ggplot(to.plot_2, 
+       aes(x = Var1, y = Freq, fill = Var2)) + 
+  geom_col(position = "fill") + 
+  scale_fill_manual(values = colors.use, name="") + 
+  scale_y_continuous(labels = scales::percent_format()) +
+  xlab("") + 
+  ylab("% of Signaling Cluster") +
+  labs(title = 'Sending Cell Types per Cluster') +
+  theme(plot.title = element_text(size = 20),
+        legend.text = element_text(size = 14),
+        axis.text.x = element_text(size= 16,color='black', angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 14,color='black'),
+        axis.title.x = element_text(size = 16,color='black'),
+        axis.title.y = element_text(size = 16,color='black'),
+        axis.line = element_line(size = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank()) + 
+    geom_text(aes(x = Var1, y = 1, label = Freq, fill = NULL), color='black',
+            data=data0, position = position_dodge(width = 0.5),vjust=-0.3,size=3)
+```
